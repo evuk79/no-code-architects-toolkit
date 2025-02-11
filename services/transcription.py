@@ -1,159 +1,267 @@
 import os
 import whisper
 import srt
-from datetime import timedelta
-from whisper.utils import WriteSRT, WriteVTT
-from services.file_management import download_file
 import logging
-import uuid
+from datetime import timedelta
+from typing import Optional, Union
+from services.file_management import download_file
 
-# Set up logging
+# Configure logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Set the default local storage directory
 STORAGE_PATH = "/tmp/"
 
-def process_transcription(media_url, output_type, max_chars=56, language=None,):
-    """Transcribe media and return the transcript, SRT or ASS file path."""
-    logger.info(f"Starting transcription for media URL: {media_url} with output type: {output_type}")
-    input_filename = download_file(media_url, os.path.join(STORAGE_PATH, 'input_media'))
-    logger.info(f"Downloaded media to local file: {input_filename}")
-
-    try:
-        model = whisper.load_model("base")
+class TranscriptionProcessor:
+    """Class to handle audio/video transcription."""
+    
+    def __init__(self):
+        self.storage_path = STORAGE_PATH
+        os.makedirs(self.storage_path, exist_ok=True)
+        logger.info(f"Initialized transcription processor with storage path: {self.storage_path}")
+        self.model = whisper.load_model("base")
         logger.info("Loaded Whisper model")
 
-        # result = model.transcribe(input_filename)
-        # logger.info("Transcription completed")
-
-        if output_type == 'transcript':
-            result = model.transcribe(input_filename, language=language)
-            output = result['text']
-            logger.info("Generated transcript output")
-        elif output_type in ['srt', 'vtt']:
-
-            result = model.transcribe(input_filename)
-            srt_subtitles = []
-            for i, segment in enumerate(result['segments'], start=1):
-                start = timedelta(seconds=segment['start'])
-                end = timedelta(seconds=segment['end'])
-                text = segment['text'].strip()
-                srt_subtitles.append(srt.Subtitle(i, start, end, text))
+    def transcribe_media(
+        self,
+        media_url: str,
+        output_type: str,
+        max_chars: int = 56,
+        language: Optional[str] = None
+    ) -> Union[str, tuple[str, str]]:
+        """Transcribe media and generate output in specified format.
+        
+        Args:
+            media_url: URL of media file to transcribe
+            output_type: Output format ('transcript', 'srt', 'vtt', 'ass')
+            max_chars: Maximum characters per line for ASS format
+            language: Optional language code for transcription
             
-            output_content = srt.compose(srt_subtitles)
+        Returns:
+            Path to output file or transcript text
             
-            # Write the output to a file
-            output_filename = os.path.join(STORAGE_PATH, f"{uuid.uuid4()}.{output_type}")
-            with open(output_filename, 'w') as f:
-                f.write(output_content)
-            
-            output = output_filename
-            logger.info(f"Generated {output_type.upper()} output: {output}")
-
-        elif output_type == 'ass':
-            result = model.transcribe(
-                input_filename,
-                word_timestamps=True,
-                task='transcribe',
-                verbose=False
+        Raises:
+            ValueError: If invalid output type is specified
+            Exception: For other errors
+        """
+        try:
+            # Download media file
+            input_filename = download_file(
+                media_url,
+                os.path.join(self.storage_path, 'input_media')
             )
-            logger.info("Transcription completed with word-level timestamps")
-            # Generate ASS subtitle content
-            ass_content = generate_ass_subtitle(result, max_chars)
-            logger.info("Generated ASS subtitle content")
+            logger.info(f"Downloaded media to: {input_filename}")
             
-            output_content = ass_content
+            # Perform transcription
+            result = self._perform_transcription(input_filename, language)
+            
+            # Generate output based on requested format
+            if output_type == 'transcript':
+                output = result['text']
+                logger.info("Generated transcript output")
+            elif output_type in ['srt', 'vtt']:
+                output = self._generate_subtitles(result, output_type)
+            elif output_type == 'ass':
+                output = self._generate_ass_subtitles(result, max_chars)
+            else:
+                raise ValueError(f"Invalid output type: {output_type}")
+            
+            # Clean up input file
+            self._cleanup_file(input_filename)
+            
+            return output
+            
+        except Exception as e:
+            logger.error(f"Transcription failed: {str(e)}")
+            raise
 
-            # Write the ASS content to a file
-            output_filename = os.path.join(STORAGE_PATH, f"{uuid.uuid4()}.{output_type}")
-            with open(output_filename, 'w') as f:
-               f.write(output_content) 
-            output = output_filename
-            logger.info(f"Generated {output_type.upper()} output: {output}")
-        else:
-            raise ValueError("Invalid output type. Must be 'transcript', 'srt', or 'vtt'.")
+    def _perform_transcription(
+        self,
+        input_filename: str,
+        language: Optional[str] = None
+    ) -> dict:
+        """Perform transcription using Whisper model.
+        
+        Args:
+            input_filename: Path to media file
+            language: Optional language code for transcription
+            
+        Returns:
+            Transcription result dictionary
+        """
+        logger.info("Starting transcription")
+        result = self.model.transcribe(input_filename, language=language)
+        logger.info("Transcription completed")
+        return result
 
-        os.remove(input_filename)
-        logger.info(f"Removed local file: {input_filename}")
-        logger.info(f"Transcription successful, output type: {output_type}")
-        return output
-    except Exception as e:
-        logger.error(f"Transcription failed: {str(e)}")
-        raise
+    def _generate_subtitles(
+        self,
+        result: dict,
+        output_type: str
+    ) -> str:
+        """Generate subtitle file in SRT or VTT format.
+        
+        Args:
+            result: Transcription result
+            output_type: Output format ('srt' or 'vtt')
+            
+        Returns:
+            Path to subtitle file
+        """
+        srt_subtitles = []
+        for i, segment in enumerate(result['segments'], start=1):
+            start = timedelta(seconds=segment['start'])
+            end = timedelta(seconds=segment['end'])
+            text = segment['text'].strip()
+            srt_subtitles.append(srt.Subtitle(i, start, end, text))
+        
+        output_content = srt.compose(srt_subtitles)
+        output_filename = os.path.join(self.storage_path, f"{uuid.uuid4()}.{output_type}")
+        
+        with open(output_filename, 'w') as f:
+            f.write(output_content)
+        
+        logger.info(f"Generated {output_type.upper()} output: {output_filename}")
+        return output_filename
 
+    def _generate_ass_subtitles(
+        self,
+        result: dict,
+        max_chars: int
+    ) -> str:
+        """Generate ASS subtitle file with word-level timestamps.
+        
+        Args:
+            result: Transcription result
+            max_chars: Maximum characters per line
+            
+        Returns:
+            Path to ASS subtitle file
+        """
+        logger.info("Generating ASS subtitles")
+        ass_content = self._create_ass_header()
+        
+        for segment in result['segments']:
+            words = segment.get('words', [])
+            if not words:
+                continue
+                
+            lines = self._group_words_into_lines(words, max_chars)
+            
+            for line in lines:
+                line_start_time = line[0]['start']
+                line_end_time = line[-1]['end']
+                
+                for i, word_info in enumerate(line):
+                    start_time = word_info['start']
+                    end_time = line[i + 1]['start'] if i + 1 < len(line) else line_end_time
+                    
+                    caption_parts = [
+                        r'{\c&H00FFFF&}' + w['word'] if w == word_info 
+                        else r'{\c&HFFFFFF&}' + w['word'] 
+                        for w in line
+                    ]
+                    caption_with_highlight = ' '.join(caption_parts)
+                    
+                    start = self._format_time(start_time)
+                    end = self._format_time(end_time)
+                    
+                    ass_content += f"Dialogue: 0,{start},{end},Default,,0,0,0,,{caption_with_highlight}\n"
+        
+        output_filename = os.path.join(self.storage_path, f"{uuid.uuid4()}.ass")
+        with open(output_filename, 'w') as f:
+            f.write(ass_content)
+        
+        logger.info(f"Generated ASS output: {output_filename}")
+        return output_filename
 
-def generate_ass_subtitle(result, max_chars):
-    """Generate ASS subtitle content with highlighted current words, showing one line at a time."""
-    logger.info("Generate ASS subtitle content with highlighted current words")
-    # ASS file header
-    ass_content = ""
+    def _create_ass_header(self) -> str:
+        """Create ASS file header.
+        
+        Returns:
+            ASS header content
+        """
+        return """[Script Info]
+Title: Highlight Current Word
+ScriptType: v4.00+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,12,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
 
-    # Helper function to format time
-    def format_time(t):
-        hours = int(t // 3600)
-        minutes = int((t % 3600) // 60)
-        seconds = int(t % 60)
-        centiseconds = int(round((t - int(t)) * 100))
-        return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
-
-    max_chars_per_line = max_chars  # Maximum characters per line
-
-    # Process each segment
-    for segment in result['segments']:
-        words = segment.get('words', [])
-        if not words:
-            continue  # Skip if no word-level timestamps
-
-        # Group words into lines
+    def _group_words_into_lines(
+        self,
+        words: list,
+        max_chars: int
+    ) -> list[list[dict]]:
+        """Group words into lines based on max characters.
+        
+        Args:
+            words: List of word dictionaries
+            max_chars: Maximum characters per line
+            
+        Returns:
+            List of grouped word lists
+        """
         lines = []
         current_line = []
         current_line_length = 0
+        
         for word_info in words:
             word_length = len(word_info['word']) + 1  # +1 for space
-            if current_line_length + word_length > max_chars_per_line:
+            if current_line_length + word_length > max_chars:
                 lines.append(current_line)
                 current_line = [word_info]
                 current_line_length = word_length
             else:
                 current_line.append(word_info)
                 current_line_length += word_length
+                
         if current_line:
             lines.append(current_line)
+            
+        return lines
 
-        # Generate events for each line
-        for line in lines:
-            line_start_time = line[0]['start']
-            line_end_time = line[-1]['end']
+    def _format_time(self, t: float) -> str:
+        """Format time for ASS subtitles.
+        
+        Args:
+            t: Time in seconds
+            
+        Returns:
+            Formatted time string
+        """
+        hours = int(t // 3600)
+        minutes = int((t % 3600) // 60)
+        seconds = int(t % 60)
+        centiseconds = int(round((t - int(t)) * 100))
+        return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
 
-            # Generate events for highlighting each word
-            for i, word_info in enumerate(line):
-                start_time = word_info['start']
-                end_time = word_info['end']
-                current_word = word_info['word']
+    def _cleanup_file(self, file_path: str) -> None:
+        """Clean up a file.
+        
+        Args:
+            file_path: Path to file to remove
+            
+        Raises:
+            OSError: If file removal fails
+        """
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info(f"Cleaned up file: {file_path}")
+        except OSError as e:
+            logger.warning(f"Error removing file {file_path}: {str(e)}")
+            raise
 
-                # Build the line text with highlighted current word
-                caption_parts = []
-                for w in line:
-                    word_text = w['word']
-                    if w == word_info:
-                        # Highlight current word
-                        caption_parts.append(r'{\c&H00FFFF&}' + word_text)
-                    else:
-                        # Default color
-                        caption_parts.append(r'{\c&HFFFFFF&}' + word_text)
-                caption_with_highlight = ' '.join(caption_parts)
-
-                # Format times
-                start = format_time(start_time)
-                # End the dialogue event when the next word starts or at the end of the line
-                if i + 1 < len(line):
-                    end_time = line[i + 1]['start']
-                else:
-                    end_time = line_end_time
-                end = format_time(end_time)
-
-                # Add the dialogue line
-                ass_content += f"Dialogue: 0,{start},{end},Default,,0,0,0,,{caption_with_highlight}\n"
-
-    return ass_content
+def process_transcription(
+    media_url: str,
+    output_type: str,
+    max_chars: int = 56,
+    language: Optional[str] = None
+) -> Union[str, tuple[str, str]]:
+    """Public interface for media transcription."""
+    processor = TranscriptionProcessor()
+    return processor.transcribe_media(media_url, output_type, max_chars, language)
