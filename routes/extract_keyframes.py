@@ -1,48 +1,52 @@
-from flask import Blueprint
-from app_utils import *
-import logging
+from routes.base_route_handler import BaseRouteHandler
 from services.extract_keyframes import process_keyframe_extraction
-from services.authentication import authenticate
 from services.cloud_storage import upload_file
+from typing import List, Dict
 
-extract_keyframes_bp = Blueprint('extract_keyframes', __name__)
-logger = logging.getLogger(__name__)
-
-@extract_keyframes_bp.route('/extract-keyframes', methods=['POST'])
-@authenticate
-@validate_payload({
-    "type": "object",
-    "properties": {
-        "video_url": {"type": "string", "format": "uri"},
-        "webhook_url": {"type": "string", "format": "uri"},
-        "id": {"type": "string"}
-    },
-    "required": ["video_url"],
-    "additionalProperties": False
-})
-@queue_task_wrapper(bypass_queue=False)
-def extract_keyframes(job_id, data):
-    video_url = data.get('video_url')
-    webhook_url = data.get('webhook_url')
-    id = data.get('id')
-
-    logger.info(f"Job {job_id}: Received keyframe extraction request for {video_url}")
-
-    try:
-        # Process keyframe extraction
+class ExtractKeyframesRouteHandler(BaseRouteHandler):
+    """Handler for keyframe extraction requests"""
+    
+    def __init__(self):
+        super().__init__('extract_keyframes')
+        self.create_route(
+            path='/extract-keyframes',
+            methods=['POST'],
+            validation_schema={
+                "type": "object",
+                "properties": {
+                    "video_url": {"type": "string", "format": "uri"},
+                    "webhook_url": {"type": "string", "format": "uri"},
+                    "id": {"type": "string"}
+                },
+                "required": ["video_url"],
+                "additionalProperties": False
+            },
+            process_func=self.process_keyframe_extraction
+        )
+        
+    def process_keyframe_extraction(self, job_id: str, data: dict) -> Dict[str, List[Dict[str, str]]]:
+        """Process keyframe extraction request
+        
+        Args:
+            job_id: Unique job identifier
+            data: Request payload
+            
+        Returns:
+            Dictionary containing list of image URLs
+        """
+        video_url = data.get('video_url')
+        self.logger.info(f"Job {job_id}: Extracting keyframes from {video_url}")
+        
+        # Extract keyframes
         image_paths = process_keyframe_extraction(video_url, job_id)
-
-        # Upload each extracted keyframe and collect the cloud URLs
+        
+        # Upload each keyframe and collect URLs
         image_urls = []
         for image_path in image_paths:
             cloud_url = upload_file(image_path)
             image_urls.append({"image_url": cloud_url})
+            
+        return {"image_urls": image_urls}
 
-        logger.info(f"Job {job_id}: Keyframes uploaded to cloud storage")
-
-        # Return the URLs of the uploaded keyframes
-        return {"image_urls": image_urls}, "/extract-keyframes", 200
-        
-    except Exception as e:
-        logger.error(f"Job {job_id}: Error during keyframe extraction - {str(e)}")
-        return str(e), "/extract-keyframes", 500
+# Create and export the blueprint
+extract_keyframes_bp = ExtractKeyframesRouteHandler().blueprint

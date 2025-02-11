@@ -1,52 +1,50 @@
-from flask import Blueprint
-from app_utils import *
-import logging
+from routes.base_route_handler import BaseRouteHandler
 from services.ffmpeg_toolkit import process_video_combination
-from services.authentication import authenticate
-from services.cloud_storage import upload_file
 
-combine_bp = Blueprint('combine', __name__)
-logger = logging.getLogger(__name__)
-
-@combine_bp.route('/combine-videos', methods=['POST'])
-@authenticate
-@validate_payload({
-    "type": "object",
-    "properties": {
-        "video_urls": {
-            "type": "array",
-            "items": {
+class CombineVideosRouteHandler(BaseRouteHandler):
+    """Handler for video combination requests"""
+    
+    def __init__(self):
+        super().__init__('combine')
+        self.create_route(
+            path='/combine-videos',
+            methods=['POST'],
+            validation_schema={
                 "type": "object",
                 "properties": {
-                    "video_url": {"type": "string", "format": "uri"}
+                    "video_urls": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "video_url": {"type": "string", "format": "uri"}
+                            },
+                            "required": ["video_url"]
+                        },
+                        "minItems": 1
+                    },
+                    "webhook_url": {"type": "string", "format": "uri"},
+                    "id": {"type": "string"}
                 },
-                "required": ["video_url"]
+                "required": ["video_urls"],
+                "additionalProperties": False
             },
-            "minItems": 1
-        },
-        "webhook_url": {"type": "string", "format": "uri"},
-        "id": {"type": "string"}
-    },
-    "required": ["video_urls"],
-    "additionalProperties": False
-})
-@queue_task_wrapper(bypass_queue=False)
-def combine_videos(job_id, data):
-    media_urls = data['video_urls']
-    webhook_url = data.get('webhook_url')
-    id = data.get('id')
+            process_func=self.process_video_combination
+        )
+        
+    def process_video_combination(self, job_id: str, data: dict) -> str:
+        """Process video combination request
+        
+        Args:
+            job_id: Unique job identifier
+            data: Request payload
+            
+        Returns:
+            Path to combined video file
+        """
+        media_urls = data['video_urls']
+        self.logger.info(f"Job {job_id}: Combining {len(media_urls)} videos")
+        return process_video_combination(media_urls, job_id)
 
-    logger.info(f"Job {job_id}: Received combine-videos request for {len(media_urls)} videos")
-
-    try:
-        output_file = process_video_combination(media_urls, job_id)
-        logger.info(f"Job {job_id}: Video combination process completed successfully")
-
-        cloud_url = upload_file(output_file)
-        logger.info(f"Job {job_id}: Combined video uploaded to cloud storage: {cloud_url}")
-
-        return cloud_url, "/combine-videos", 200
-
-    except Exception as e:
-        logger.error(f"Job {job_id}: Error during video combination process - {str(e)}")
-        return str(e), "/combine-videos", 500
+# Create and export the blueprint
+combine_bp = CombineVideosRouteHandler().blueprint
