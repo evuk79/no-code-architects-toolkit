@@ -5,62 +5,78 @@ import threading
 import uuid
 import os
 import time
-from version import BUILD_NUMBER  # Import the BUILD_NUMBER
+import logging
+from version import BUILD_NUMBER
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 MAX_QUEUE_LENGTH = int(os.environ.get('MAX_QUEUE_LENGTH', 0))
 
-def create_app():
-    app = Flask(__name__)
+class TaskQueueManager:
+    """Manages task queue and processing."""
+    
+    def __init__(self):
+        self.task_queue = Queue()
+        self.queue_id = id(self.task_queue)
+        self._start_processing_thread()
 
-    # Create a queue to hold tasks
-    task_queue = Queue()
-    queue_id = id(task_queue)  # Generate a single queue_id for this worker
+    def _start_processing_thread(self):
+        """Start the queue processing thread."""
+        threading.Thread(target=self._process_queue, daemon=True).start()
 
-    # Function to process tasks from the queue
-    def process_queue():
+    def _process_queue(self):
+        """Process tasks from the queue."""
         while True:
-            job_id, data, task_func, queue_start_time = task_queue.get()
-            queue_time = time.time() - queue_start_time
-            run_start_time = time.time()
-            pid = os.getpid()  # Get the PID of the actual processing thread
-            response = task_func()
-            run_time = time.time() - run_start_time
-            total_time = time.time() - queue_start_time
+            try:
+                job_id, data, task_func, queue_start_time = self.task_queue.get()
+                queue_time = time.time() - queue_start_time
+                run_start_time = time.time()
+                pid = os.getpid()
+                
+                response = task_func()
+                run_time = time.time() - run_start_time
+                total_time = time.time() - queue_start_time
 
-            response_data = {
-                "endpoint": response[1],
-                "code": response[2],
-                "id": data.get("id"),
-                "job_id": job_id,
-                "response": response[0] if response[2] == 200 else None,
-                "message": "success" if response[2] == 200 else response[0],
-                "pid": pid,
-                "queue_id": queue_id,
-                "run_time": round(run_time, 3),
-                "queue_time": round(queue_time, 3),
-                "total_time": round(total_time, 3),
-                "queue_length": task_queue.qsize(),
-                "build_number": BUILD_NUMBER  # Add build number to response
-            }
+                response_data = {
+                    "endpoint": response[1],
+                    "code": response[2],
+                    "id": data.get("id"),
+                    "job_id": job_id,
+                    "response": response[0] if response[2] == 200 else None,
+                    "message": "success" if response[2] == 200 else response[0],
+                    "pid": pid,
+                    "queue_id": self.queue_id,
+                    "run_time": round(run_time, 3),
+                    "queue_time": round(queue_time, 3),
+                    "total_time": round(total_time, 3),
+                    "queue_length": self.task_queue.qsize(),
+                    "build_number": BUILD_NUMBER
+                }
 
-            send_webhook(data.get("webhook_url"), response_data)
+                send_webhook(data.get("webhook_url"), response_data)
+                self.task_queue.task_done()
 
-            task_queue.task_done()
+            except Exception as e:
+                logger.error(f"Error processing task: {str(e)}")
+                continue
 
-    # Start the queue processing in a separate thread
-    threading.Thread(target=process_queue, daemon=True).start()
+def create_app():
+    """Create and configure the Flask application."""
+    app = Flask(__name__)
+    task_manager = TaskQueueManager()
 
-    # Decorator to add tasks to the queue or bypass it
     def queue_task(bypass_queue=False):
+        """Decorator to add tasks to the queue or bypass it."""
         def decorator(f):
             def wrapper(*args, **kwargs):
                 job_id = str(uuid.uuid4())
                 data = request.json if request.is_json else {}
-                pid = os.getpid()  # Get PID for non-queued tasks
+                pid = os.getpid()
                 start_time = time.time()
                 
                 if bypass_queue or 'webhook_url' not in data:
-                    
                     response = f(job_id=job_id, data=data, *args, **kwargs)
                     run_time = time.time() - start_time
                     return {
@@ -73,24 +89,24 @@ def create_app():
                         "queue_time": 0,
                         "total_time": round(run_time, 3),
                         "pid": pid,
-                        "queue_id": queue_id,
-                        "queue_length": task_queue.qsize(),
-                        "build_number": BUILD_NUMBER  # Add build number to response
+                        "queue_id": task_manager.queue_id,
+                        "queue_length": task_manager.task_queue.qsize(),
+                        "build_number": BUILD_NUMBER
                     }, response[2]
                 else:
-                    if MAX_QUEUE_LENGTH > 0 and task_queue.qsize() >= MAX_QUEUE_LENGTH:
+                    if MAX_QUEUE_LENGTH > 0 and task_manager.task_queue.qsize() >= MAX_QUEUE_LENGTH:
                         return {
                             "code": 429,
                             "id": data.get("id"),
                             "job_id": job_id,
                             "message": f"MAX_QUEUE_LENGTH ({MAX_QUEUE_LENGTH}) reached",
                             "pid": pid,
-                            "queue_id": queue_id,
-                            "queue_length": task_queue.qsize(),
-                            "build_number": BUILD_NUMBER  # Add build number to response
+                            "queue_id": task_manager.queue_id,
+                            "queue_length": task_manager.task_queue.qsize(),
+                            "build_number": BUILD_NUMBER
                         }, 429
                     
-                    task_queue.put((job_id, data, lambda: f(job_id=job_id, data=data, *args, **kwargs), start_time))
+                    task_manager.task_queue.put((job_id, data, lambda: f(job_id=job_id, data=data, *args, **kwargs), start_time))
                     
                     return {
                         "code": 202,
@@ -98,29 +114,27 @@ def create_app():
                         "job_id": job_id,
                         "message": "processing",
                         "pid": pid,
-                        "queue_id": queue_id,
+                        "queue_id": task_manager.queue_id,
                         "max_queue_length": MAX_QUEUE_LENGTH if MAX_QUEUE_LENGTH > 0 else "unlimited",
-                        "queue_length": task_queue.qsize(),
-                        "build_number": BUILD_NUMBER  # Add build number to response
+                        "queue_length": task_manager.task_queue.qsize(),
+                        "build_number": BUILD_NUMBER
                     }, 202
             return wrapper
         return decorator
 
     app.queue_task = queue_task
 
-    # Import blueprints
+    # Import and register blueprints
     from routes.media_to_mp3 import convert_bp
     from routes.transcribe_media import transcribe_bp
     from routes.combine_videos import combine_bp
     from routes.audio_mixing import audio_mixing_bp
     from routes.gdrive_upload import gdrive_upload_bp
     from routes.authenticate import auth_bp
-    from routes.caption_video import caption_bp 
+    from routes.caption_video import caption_bp
     from routes.extract_keyframes import extract_keyframes_bp
     from routes.image_to_video import image_to_video_bp
     
-
-    # Register blueprints
     app.register_blueprint(convert_bp)
     app.register_blueprint(transcribe_bp)
     app.register_blueprint(combine_bp)
@@ -130,10 +144,8 @@ def create_app():
     app.register_blueprint(caption_bp)
     app.register_blueprint(extract_keyframes_bp)
     app.register_blueprint(image_to_video_bp)
-    
-    
 
-    # version 1.0
+    # Version 1.0 blueprints
     from routes.v1.ffmpeg.ffmpeg_compose import v1_ffmpeg_compose_bp
     from routes.v1.media.media_transcribe import v1_media_transcribe_bp
     from routes.v1.media.transform.media_to_mp3 import v1_media_transform_mp3_bp
