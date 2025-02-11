@@ -1,8 +1,6 @@
 import os
 import logging
 from abc import ABC, abstractmethod
-from services.gcp_toolkit import upload_to_gcs
-from services.s3_toolkit import upload_to_s3
 from config import validate_env_vars
 
 logger = logging.getLogger(__name__)
@@ -12,38 +10,35 @@ class CloudStorageProvider(ABC):
     def upload_file(self, file_path: str) -> str:
         pass
 
-class GCPStorageProvider(CloudStorageProvider):
+class LocalStorageProvider(CloudStorageProvider):
     def __init__(self):
-        self.bucket_name = os.getenv('GCP_BUCKET_NAME')
+        self.storage_path = os.getenv('LOCAL_STORAGE_PATH', '/var/www/uploads')
+        os.makedirs(self.storage_path, exist_ok=True)
 
     def upload_file(self, file_path: str) -> str:
-        return upload_to_gcs(file_path, self.bucket_name)
-
-class S3CompatibleProvider(CloudStorageProvider):
-    def __init__(self):
-        self.endpoint_url = os.getenv('S3_ENDPOINT_URL')
-        self.access_key = os.getenv('S3_ACCESS_KEY')
-        self.secret_key = os.getenv('S3_SECRET_KEY')
-
-    def upload_file(self, file_path: str) -> str:
-        return upload_to_s3(file_path, self.endpoint_url, self.access_key, self.secret_key)
+        try:
+            filename = os.path.basename(file_path)
+            destination = os.path.join(self.storage_path, filename)
+            
+            # Move the file to the storage location
+            os.rename(file_path, destination)
+            
+            # Return the URL/path to the stored file
+            return f"/uploads/{filename}"
+        except Exception as e:
+            logger.error(f"Error storing file locally: {e}")
+            raise
 
 def get_storage_provider() -> CloudStorageProvider:
-    try:
-        validate_env_vars('GCP')
-        return GCPStorageProvider()
-    except ValueError:
-        validate_env_vars('S3')
-        return S3CompatibleProvider()
+    return LocalStorageProvider()
 
 def upload_file(file_path: str) -> str:
     provider = get_storage_provider()
     try:
-        logger.info(f"Uploading file to cloud storage: {file_path}")
+        logger.info(f"Storing file locally: {file_path}")
         url = provider.upload_file(file_path)
-        logger.info(f"File uploaded successfully: {url}")
+        logger.info(f"File stored successfully: {url}")
         return url
     except Exception as e:
-        logger.error(f"Error uploading file to cloud storage: {e}")
+        logger.error(f"Error storing file: {e}")
         raise
-    
